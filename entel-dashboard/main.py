@@ -11,19 +11,19 @@ import config_store
 import notif_store
 
 INFLUXDB_URL    = "http://localhost:8086"
-INFLUXDB_TOKEN  = "entel-super-secret-token-influx-2024"
+INFLUXDB_TOKEN  = "entel-2026"
 INFLUXDB_ORG    = "entel"
 INFLUXDB_BUCKET = "telemetry"
-DEVICE_ID       = "esp32_001"
 POLL_INTERVAL   = 1
 HIST_LEN        = 30
-I_MAX           = 2.5
+I_MAX           = 65.0
 
 
 def main(page: ft.Page):
     page.title = "Dashboard de Telemetria"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 0
+    page.window.width = 1400
 
     _state = {"rodando": None, "influx": None, "role": None, "username": None}
 
@@ -90,6 +90,7 @@ def main(page: ft.Page):
         # ── Estado ────────────────────────────────────────────────────────────
         v_hist: deque[float] = deque([220.0] * HIST_LEN, maxlen=HIST_LEN)
         i_hist: deque[float] = deque([0.0]   * HIST_LEN, maxlen=HIST_LEN)
+        p_hist: deque[float] = deque([0.0]   * HIST_LEN, maxlen=HIST_LEN)
         _ndata              = notif_store.load()
         notificacoes: list[str] = [n["texto"] for n in _ndata["notificacoes"]]
         _max_notif          = [_ndata.get("max_count", 1000)]
@@ -101,6 +102,8 @@ def main(page: ft.Page):
         _v_count            = [0]
         _i_total            = [0.0]
         _i_count            = [0]
+        _p_total            = [0.0]
+        _p_count            = [0]
         del _ndata
         inicio          = time.time()
         rodando         = [True]
@@ -109,7 +112,7 @@ def main(page: ft.Page):
         _state["rodando"] = rodando
 
         config    = config_store.load()
-        _poll_ms  = [config.get("poll_interval_ms", 1000)]
+        _poll_ms      = [config.get("poll_interval_ms", 1000)]
         alarme    = {"ativo": False, "silenciado": False, "fora_desde": None, "dentro_desde": None}
 
         # ── InfluxDB ──────────────────────────────────────────────────────────
@@ -118,14 +121,22 @@ def main(page: ft.Page):
         query_api = influx.query_api()
 
         def buscar_dados() -> dict | None:
+            _CAMPOS = {
+                "uplink_message_decoded_payload_tensao_v":    "voltage",
+                "uplink_message_decoded_payload_corrente_a":  "current",
+                "uplink_message_decoded_payload_energia_kwh": "energy_kwh",
+                "uplink_message_decoded_payload_potencia_w":  "power_w",
+                "uplink_message_decoded_payload_freq_hz":     "freq_hz",
+            }
             flux = f'''
             from(bucket: "{INFLUXDB_BUCKET}")
-              |> range(start: -30s)
-              |> filter(fn: (r) => r["_measurement"] == "power")
-              |> filter(fn: (r) => r["_field"] == "voltage" or
-                                   r["_field"] == "current" or
-                                   r["_field"] == "energy_kwh")
-              |> filter(fn: (r) => r["device_id"] == "{DEVICE_ID}")
+              |> range(start: -2m)
+              |> filter(fn: (r) => r["_measurement"] == "mqtt_consumer")
+              |> filter(fn: (r) => r["_field"] == "uplink_message_decoded_payload_tensao_v" or
+                                   r["_field"] == "uplink_message_decoded_payload_corrente_a" or
+                                   r["_field"] == "uplink_message_decoded_payload_energia_kwh" or
+                                   r["_field"] == "uplink_message_decoded_payload_potencia_w" or
+                                   r["_field"] == "uplink_message_decoded_payload_freq_hz")
               |> last()
             '''
             try:
@@ -134,9 +145,10 @@ def main(page: ft.Page):
                 ts     = None
                 for table in tables:
                     for rec in table.records:
-                        result[rec.get_field()] = rec.get_value()
+                        key = _CAMPOS.get(rec.get_field(), rec.get_field())
+                        result[key] = rec.get_value()
                         ts = rec.get_time()
-                if len(result) == 3:
+                if len(result) == 5:
                     result["_time"] = ts
                     return result
                 return None
@@ -158,7 +170,7 @@ def main(page: ft.Page):
         )
         grafico_v = fch.LineChart(
             data_series=[linha_v], expand=True,
-            min_y=200, max_y=240,
+            min_y=180, max_y=260,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
             horizontal_grid_lines=fch.ChartGridLines(
@@ -174,11 +186,27 @@ def main(page: ft.Page):
         )
         grafico_i = fch.LineChart(
             data_series=[linha_i], expand=True,
-            min_y=0, max_y=4,
+            min_y=0, max_y=50,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
             horizontal_grid_lines=fch.ChartGridLines(
-                interval=1, color=ft.Colors.with_opacity(0.15, ft.Colors.WHITE)),
+                interval=10, color=ft.Colors.with_opacity(0.15, ft.Colors.WHITE)),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.3, ft.Colors.WHITE)),
+        )
+
+        linha_p = fch.LineChartData(
+            color=ft.Colors.TEAL_400, stroke_width=2, curved=True,
+            rounded_stroke_cap=True,
+            below_line_bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.TEAL_400),
+            points=make_pts(p_hist),
+        )
+        grafico_p = fch.LineChart(
+            data_series=[linha_p], expand=True,
+            min_y=0, max_y=3000,
+            left_axis=fch.ChartAxis(label_size=40),
+            bottom_axis=fch.ChartAxis(label_size=24),
+            horizontal_grid_lines=fch.ChartGridLines(
+                interval=500, color=ft.Colors.with_opacity(0.15, ft.Colors.WHITE)),
             border=ft.Border.all(1, ft.Colors.with_opacity(0.3, ft.Colors.WHITE)),
         )
 
@@ -198,9 +226,15 @@ def main(page: ft.Page):
                 color=ft.Colors.ORANGE_400, border_radius=2,
             )]) for i, v in enumerate(hist)]
 
+        def make_bar_p(hist):
+            return [fch.BarChartGroup(x=i, rods=[fch.BarChartRod(
+                from_y=0, to_y=round(v, 1), width=6,
+                color=ft.Colors.TEAL_400, border_radius=2,
+            )]) for i, v in enumerate(hist)]
+
         grafico_barra_v = fch.BarChart(
             groups=make_bar_v(v_hist), expand=True,
-            min_y=200, max_y=240,
+            min_y=180, max_y=260,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
             horizontal_grid_lines=fch.ChartGridLines(interval=10, color=_grid_w),
@@ -208,10 +242,18 @@ def main(page: ft.Page):
         )
         grafico_barra_i = fch.BarChart(
             groups=make_bar_i(i_hist), expand=True,
-            min_y=0, max_y=4,
+            min_y=0, max_y=50,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
-            horizontal_grid_lines=fch.ChartGridLines(interval=1, color=_grid_w),
+            horizontal_grid_lines=fch.ChartGridLines(interval=10, color=_grid_w),
+            border=_brd_w,
+        )
+        grafico_barra_p = fch.BarChart(
+            groups=make_bar_p(p_hist), expand=True,
+            min_y=0, max_y=3000,
+            left_axis=fch.ChartAxis(label_size=40),
+            bottom_axis=fch.ChartAxis(label_size=24),
+            horizontal_grid_lines=fch.ChartGridLines(interval=500, color=_grid_w),
             border=_brd_w,
         )
 
@@ -230,9 +272,16 @@ def main(page: ft.Page):
                                          radius=4, color=ft.Colors.ORANGE_400)
                     for i, v in enumerate(hist)]
 
+        def make_scatter_p(hist):
+            poll_s = _poll_ms[0] / 1000.0
+            n = len(hist)
+            return [fch.ScatterChartSpot(x=-(n - 1 - i) * poll_s, y=round(v, 1),
+                                         radius=4, color=ft.Colors.TEAL_400)
+                    for i, v in enumerate(hist)]
+
         grafico_scatter_v = fch.ScatterChart(
             spots=make_scatter_v(v_hist), expand=True,
-            min_y=200, max_y=240,
+            min_y=180, max_y=260,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
             horizontal_grid_lines=fch.ChartGridLines(interval=10, color=_grid_w),
@@ -240,19 +289,29 @@ def main(page: ft.Page):
         )
         grafico_scatter_i = fch.ScatterChart(
             spots=make_scatter_i(i_hist), expand=True,
-            min_y=0, max_y=4,
+            min_y=0, max_y=50,
             left_axis=fch.ChartAxis(label_size=40),
             bottom_axis=fch.ChartAxis(label_size=24),
-            horizontal_grid_lines=fch.ChartGridLines(interval=1, color=_grid_w),
+            horizontal_grid_lines=fch.ChartGridLines(interval=10, color=_grid_w),
+            border=_brd_w,
+        )
+        grafico_scatter_p = fch.ScatterChart(
+            spots=make_scatter_p(p_hist), expand=True,
+            min_y=0, max_y=3000,
+            left_axis=fch.ChartAxis(label_size=40),
+            bottom_axis=fch.ChartAxis(label_size=24),
+            horizontal_grid_lines=fch.ChartGridLines(interval=500, color=_grid_w),
             border=_brd_w,
         )
 
         # Containers que trocam de gráfico
         cont_v = ft.Container(content=grafico_v, expand=True)
         cont_i = ft.Container(content=grafico_i, expand=True)
+        cont_p = ft.Container(content=grafico_p, expand=True)
 
         _graficos_v = {"linha": grafico_v, "barra": grafico_barra_v, "dispersao": grafico_scatter_v}
         _graficos_i = {"linha": grafico_i, "barra": grafico_barra_i, "dispersao": grafico_scatter_i}
+        _graficos_p = {"linha": grafico_p, "barra": grafico_barra_p, "dispersao": grafico_scatter_p}
 
         sel_v = ft.SegmentedButton(
             segments=[
@@ -282,11 +341,27 @@ def main(page: ft.Page):
                 page.update(),
             ),
         )
+        sel_p = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="linha",     label=ft.Text("Linha")),
+                ft.Segment(value="barra",     label=ft.Text("Barras")),
+                ft.Segment(value="dispersao", label=ft.Text("Dispersão")),
+            ],
+            selected=["linha"],
+            allow_empty_selection=False,
+            allow_multiple_selection=False,
+            on_change=lambda e: (
+                cont_p.__setattr__("content", _graficos_p[e.control.selected[0]]),
+                page.update(),
+            ),
+        )
 
         # ── Cards ─────────────────────────────────────────────────────────────
         txt_tensao   = ft.Text("--",       size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.CYAN_400)
         txt_corrente = ft.Text("--",       size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE_400)
+        txt_potencia = ft.Text("--",       size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.TEAL_400)
         txt_energia  = ft.Text("--",       size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_400)
+        txt_freq     = ft.Text("--",       size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_300)
         txt_uptime   = ft.Text("00:00:00", size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.AMBER_400)
         txt_latencia = ft.Text("--",        size=28, weight=ft.FontWeight.BOLD, color=ft.Colors.PURPLE_300)
 
@@ -310,7 +385,9 @@ def main(page: ft.Page):
             controls=[
                 card("Tensão (V)",     txt_tensao,   ft.Colors.CYAN_400),
                 card("Corrente (A)",   txt_corrente, ft.Colors.ORANGE_400),
+                card("Potência (W)",   txt_potencia, ft.Colors.TEAL_400),
                 card("Energia (kWh)",  txt_energia,  ft.Colors.GREEN_400),
+                card("Frequência (Hz)", txt_freq,    ft.Colors.BLUE_300),
                 card("Última Leitura", txt_latencia, ft.Colors.PURPLE_300),
                 card("Uptime",         txt_uptime,   ft.Colors.AMBER_400),
             ],
@@ -320,6 +397,7 @@ def main(page: ft.Page):
         # ── Cards de média ────────────────────────────────────────────────────
         txt_media_v = ft.Text("-- V", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.CYAN_400)
         txt_media_i = ft.Text("-- A", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE_400)
+        txt_media_p = ft.Text("-- W", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.TEAL_400)
 
         def reset_media_v(e=None):
             _v_total[0] = 0.0
@@ -331,6 +409,12 @@ def main(page: ft.Page):
             _i_total[0] = 0.0
             _i_count[0] = 0
             txt_media_i.value = "-- A"
+            page.update()
+
+        def reset_media_p(e=None):
+            _p_total[0] = 0.0
+            _p_count[0] = 0
+            txt_media_p.value = "-- W"
             page.update()
 
         def _card_media(titulo, valor_widget, cor, on_reset):
@@ -362,6 +446,7 @@ def main(page: ft.Page):
             controls=[
                 _card_media("Média Tensão (V)",   txt_media_v, ft.Colors.CYAN_400,   reset_media_v),
                 _card_media("Média Corrente (A)", txt_media_i, ft.Colors.ORANGE_400, reset_media_i),
+                _card_media("Média Potência (W)", txt_media_p, ft.Colors.TEAL_400,   reset_media_p),
             ],
             spacing=12,
         )
@@ -387,7 +472,7 @@ def main(page: ft.Page):
 
         def adicionar_notif(msg: str):
             ts_full  = time.strftime("%Y-%m-%d %H:%M:%S")
-            ts_short = time.strftime("%H:%M:%S")
+            ts_short = time.strftime("%Y/%m/%d %H:%M:%S")
             entrada  = f"[{ts_short}] {msg}"
             notificacoes.insert(0, entrada)
             while len(notificacoes) > _max_notif[0]:
@@ -456,27 +541,38 @@ def main(page: ft.Page):
             v = float(dados["voltage"])
             i = float(dados["current"])
             e = float(dados["energy_kwh"])
+            p = float(dados["power_w"])
+            f = float(dados["freq_hz"])
 
             v_hist.append(v)
             i_hist.append(i)
+            p_hist.append(p)
 
-            linha_v.points        = make_pts(v_hist)
-            linha_i.points        = make_pts(i_hist)
-            grafico_barra_v.groups   = make_bar_v(v_hist)
-            grafico_barra_i.groups   = make_bar_i(i_hist)
-            grafico_scatter_v.spots  = make_scatter_v(v_hist)
-            grafico_scatter_i.spots  = make_scatter_i(i_hist)
+            linha_v.points          = make_pts(v_hist)
+            linha_i.points          = make_pts(i_hist)
+            linha_p.points          = make_pts(p_hist)
+            grafico_barra_v.groups  = make_bar_v(v_hist)
+            grafico_barra_i.groups  = make_bar_i(i_hist)
+            grafico_barra_p.groups  = make_bar_p(p_hist)
+            grafico_scatter_v.spots = make_scatter_v(v_hist)
+            grafico_scatter_i.spots = make_scatter_i(i_hist)
+            grafico_scatter_p.spots = make_scatter_p(p_hist)
 
             txt_tensao.value   = f"{v:.1f} V"
             txt_corrente.value = f"{i:.3f} A"
+            txt_potencia.value = f"{p:.1f} W"
             txt_energia.value  = f"{e:.6f}"
+            txt_freq.value     = f"{f:.1f} Hz"
 
             _v_total[0] += v
             _v_count[0] += 1
             _i_total[0] += i
             _i_count[0] += 1
+            _p_total[0] += p
+            _p_count[0] += 1
             txt_media_v.value = f"{_v_total[0] / _v_count[0]:.2f} V"
             txt_media_i.value = f"{_i_total[0] / _i_count[0]:.3f} A"
+            txt_media_p.value = f"{_p_total[0] / _p_count[0]:.1f} W"
 
             verificar_alarme(v)
             if i > I_MAX:
@@ -763,6 +859,17 @@ def main(page: ft.Page):
                                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
                                 cont_i,
+                            ]),
+                            ft.Column(expand=True, spacing=4, controls=[
+                                ft.Row(
+                                    controls=[
+                                        ft.Text("Potência (W)", size=12, color=ft.Colors.TEAL_400),
+                                        ft.Container(expand=True),
+                                        sel_p,
+                                    ],
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                cont_p,
                             ]),
                         ],
                     ),

@@ -26,7 +26,6 @@ INFLUXDB_URL    = os.environ["INFLUXDB_URL"]
 INFLUXDB_TOKEN  = os.environ["INFLUXDB_TOKEN"]
 INFLUXDB_ORG    = os.environ["INFLUXDB_ORG"]
 INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "telemetry")
-DEVICE_ID       = os.environ.get("DEVICE_ID", "esp32_001")
 SMTP_USER       = os.environ["SMTP_USER"]
 SMTP_PASS       = os.environ["SMTP_PASS"]
 
@@ -67,7 +66,7 @@ def enviar_email(tipo: str, v: float, v_min: float, v_max: float) -> None:
         f"Tipo        : {tipo}\n"
         f"Medição     : {v:.1f} V\n"
         f"Limite      : {limite_str}\n"
-        f"Dispositivo : {DEVICE_ID}\n"
+        f"Dispositivo : lorawan-entel (TTN)\n"
         f"Data/Hora   : {agora_str}\n\n"
         f"---\n"
         f"Sistema de Telemetria ENTEL\n"
@@ -143,10 +142,9 @@ def verificar_alarme(v: float) -> None:
 def buscar_tensao(query_api) -> float | None:
     flux = f'''
     from(bucket: "{INFLUXDB_BUCKET}")
-      |> range(start: -10s)
-      |> filter(fn: (r) => r["_measurement"] == "power")
-      |> filter(fn: (r) => r["_field"] == "voltage")
-      |> filter(fn: (r) => r["device_id"] == "{DEVICE_ID}")
+      |> range(start: -2m)
+      |> filter(fn: (r) => r["_measurement"] == "mqtt_consumer")
+      |> filter(fn: (r) => r["_field"] == "uplink_message_decoded_payload_tensao_v")
       |> last()
     '''
     try:

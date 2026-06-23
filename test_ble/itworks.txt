@@ -1,0 +1,119 @@
+#include <ModbusMaster.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* WIFI_SSID = "SEU_SSID_AQUI";
+const char* WIFI_PASS = "SUA_SENHA_AQUI";
+
+#define RS485_BAUD 9600
+#define RS485_RX   5
+#define RS485_TX   4
+HardwareSerial RS485Serial(1);
+
+ModbusMaster node;
+WebServer server(80);
+
+String debug_status = "Aguardando primeira leitura...";
+unsigned long ultima_leitura = 0;
+
+bool ja_teve_sucesso = false;
+float ultima_tensao = 0;
+float ultima_corrente = 0;
+float ultima_potencia = 0;
+float ultima_freq = 0;
+float ultima_fp = 0;
+float ultima_energia = 0;
+unsigned long timestamp_sucesso = 0;
+int total_sucessos = 0;
+int total_tentativas = 0;
+
+void setup() {
+  Serial.begin(115200);
+  RS485Serial.begin(RS485_BAUD, SERIAL_8N1, RS485_RX, RS485_TX);
+
+  node.begin(1, RS485Serial); // Slave ID = 1
+
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  Serial.print("Conectado! IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.begin();
+}
+
+void loop() {
+  if (millis() - ultima_leitura > 3000) {
+    lerMedidor();
+  }
+  server.handleClient();
+}
+
+void lerMedidor() {
+  delay(100);
+  total_tentativas++;
+  uint8_t result = node.readHoldingRegisters(0x0000, 18);
+
+  if (result == node.ku8MBSuccess) {
+    uint16_t regs[18];
+    for (int i = 0; i < 18; i++) {
+      regs[i] = node.getResponseBuffer(i);
+    }
+
+    // Mapa correto confirmado no manual oficial:
+    // 0x0000-0x0001 (idx 0-1): Total kWh (uint32)
+    // 0x0008-0x0009 (idx 8-9): Export kWh (uint32)
+    // 0x000A-0x000B (idx 10-11): Import kWh (uint32)
+    // 0x000C (idx 12): Voltage (uint16, /10)
+    // 0x000D (idx 13): Current (uint16, /100)
+    // 0x000E (idx 14): Active power (uint16, em kW *1000, ou ja em W dependendo do firmware)
+    // 0x000F (idx 15): Reactive power
+    // 0x0010 (idx 16): Power factor (uint16, /1000)
+    // 0x0011 (idx 17): Frequency (uint16, /100)
+
+    uint32_t e_total = ((uint32_t)regs[0] << 16) | regs[1];
+
+    ultima_energia   = e_total / 100.0;
+    ultima_tensao    = regs[12] / 10.0;
+    ultima_corrente  = regs[13] / 100.0;
+    ultima_potencia  = (int16_t)regs[14]; // pode precisar /1000 se vier em mW, teste e ajuste
+    ultima_fp        = regs[16] / 1000.0;
+    ultima_freq      = regs[17] / 100.0;
+
+    timestamp_sucesso = millis();
+    ja_teve_sucesso = true;
+    total_sucessos++;
+
+    debug_status = "OK - leitura valida";
+  } else {
+    debug_status = "Erro Modbus, codigo: 0x" + String(result, HEX);
+  }
+  ultima_leitura = millis();
+}
+
+void handleRoot() {
+  String html = "<html><meta http-equiv='refresh' content='3'><body style='font-family:sans-serif;background:#111;color:#eee;padding:20px;'>";
+  html += "<h1>Medidor DDS238</h1>";
+
+  html += "<p><b>Status da ultima tentativa:</b> " + debug_status + "</p>";
+  html += "<p><b>Tentativas:</b> " + String(total_tentativas) + " | <b>Sucessos:</b> " + String(total_sucessos) + "</p>";
+  html += "<hr>";
+
+  if (ja_teve_sucesso) {
+    unsigned long segundos_atras = (millis() - timestamp_sucesso) / 1000;
+    html += "<h2 style='color:#4f4;'>Ultima leitura valida</h2>";
+    html += "<p>Tensao: " + String(ultima_tensao) + " V</p>";
+    html += "<p>Corrente: " + String(ultima_corrente) + " A</p>";
+    html += "<p>Potencia: " + String(ultima_potencia) + " W</p>";
+    html += "<p>Fator de Potencia: " + String(ultima_fp) + "</p>";
+    html += "<p>Frequencia: " + String(ultima_freq) + " Hz</p>";
+    html += "<p>Energia Total: " + String(ultima_energia) + " kWh</p>";
+    html += "<p style='color:#888;'>Capturado ha " + String(segundos_atras) + " segundos (desde o boot)</p>";
+  } else {
+    html += "<h2 style='color:#f44;'>Nenhuma leitura bem-sucedida ainda</h2>";
+  }
+
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
