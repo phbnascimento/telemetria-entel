@@ -10,8 +10,6 @@ armazena no InfluxDB e exibe em um dashboard Flet com alertas por e-mail.
 
 ![Dashboard](assets/dashboard.png)
 
-<!-- Substitua docs/dashboard.png por um print real da aplicação em execução -->
-
 ---
 
 ## Arquitetura
@@ -100,20 +98,29 @@ formatter de payload (JavaScript) na aplicação:
 
 ```js
 function decodeUplink(input) {
-    var b = input.bytes;
-    var e = (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) / 1000.0;
-    var v = (b[4] | b[5] << 8) / 10.0;
-    var i = (b[6] | b[7] << 8) / 1000.0;
-    var p = b[8] | b[9] << 8 << 16 >> 16;
-    var f = (b[10] | b[11] << 8) / 100.0;
+    var raw = input.bytes;
+
+    var b = [];
+    for (var i = 0; i < raw.length; i += 2) {
+        b.push(parseInt(String.fromCharCode(raw[i], raw[i + 1]), 16));
+    }
+
+    var energia_kwh = ((b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0) /
+        1000.0;
+    var tensao_v = (b[4] | b[5] << 8) / 10.0;
+    var corrente_a = (b[6] | b[7] << 8) / 1000.0;
+    var potencia_w = b[8] | b[9] << 8;
+    if (potencia_w >= 32768) potencia_w -= 65536;
+    var freq_hz = (b[10] | b[11] << 8) / 100.0;
     var fp = (b[12] | b[13] << 8) / 1000.0;
+
     return {
         data: {
-            energia_kwh: e,
-            tensao_v: v,
-            corrente_a: i,
-            potencia_w: p,
-            freq_hz: f,
+            energia_kwh: energia_kwh,
+            tensao_v: tensao_v,
+            corrente_a: corrente_a,
+            potencia_w: potencia_w,
+            freq_hz: freq_hz,
             fp: fp,
         },
     };
@@ -173,15 +180,6 @@ python main.py
 Serviço Docker independente que consulta o InfluxDB a cada segundo e envia
 e-mail quando a tensão ultrapassa os limites configurados. Suporta histerese e
 cooldown entre notificações repetidas.
-
----
-
-## Teste BLE
-
-`test_ble/test_ble.ino` permite testar o medidor sem gateway LoRaWAN. Transmite
-as leituras via BLE (perfil HM-10, UUID `FFE0`/`FFE1`) a cada 3 segundos. Use o
-app **Serial Bluetooth Terminal** (Android) conectando ao dispositivo
-`ENTEL-test`.
 
 ---
 

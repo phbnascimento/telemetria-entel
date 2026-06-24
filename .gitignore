@@ -5,4 +5,3 @@ grafana/data/
 __pycache__/
 *.pyc
 .venv/
-esp/esp.ino
